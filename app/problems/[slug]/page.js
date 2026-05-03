@@ -2,6 +2,7 @@
 import { useState, useEffect, use } from 'react';
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
+import axios from 'axios';
 import Navbar from '@/components/Navbar';
 import { getProblemBySlug, PROBLEMS } from '@/lib/problems';
 import { supabase, markProblemSolved, unmarkProblemSolved, getSolvedProblems } from '@/lib/supabase';
@@ -108,9 +109,71 @@ export default function ProblemPage({ params }) {
     setRunning(true);
     setTestTab('output');
     setOutput('Running your code...');
-    await new Promise(r => setTimeout(r, 1200));
-    setOutput(`// Code execution requires Judge0 API integration.\n// Click the LeetCode link to run and submit your solution.\n\nYour code:\n${code.slice(0, 200)}...`);
-    setRunning(false);
+
+    // Map our lang selector to Judge0 language IDs
+    const langMap = {
+      python: 71, // Python (3.8.1)
+      java: 62,   // Java (OpenJDK 13.0.1)
+      cpp: 54,    // C++ (GCC 9.2.0)
+      javascript: 63, // JavaScript (Node.js 12.14.0)
+    };
+
+    const language_id = langMap[lang];
+
+    try {
+      // 1. Submit the code to Judge0 API
+      const options = {
+        method: 'POST',
+        url: 'https://ce.judge0.com/submissions',
+        params: { base64_encoded: 'false', fields: '*' },
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        data: {
+          language_id: language_id,
+          source_code: code,
+          // We feed the first test case input to stdin for testing
+          stdin: exampleCases[activeCase]?.input || ''
+        }
+      };
+
+      const response = await axios.request(options);
+      const token = response.data.token;
+
+      // 2. Poll the API for the result
+      let resultResponse;
+      let statusId = 1; // 1 = In Queue, 2 = Processing
+      
+      while (statusId === 1 || statusId === 2) {
+        await new Promise(r => setTimeout(r, 1000)); // Wait 1s between polls
+        const getOptions = {
+          method: 'GET',
+          url: \`https://ce.judge0.com/submissions/\${token}\`,
+          params: { base64_encoded: 'false', fields: '*' },
+        };
+        resultResponse = await axios.request(getOptions);
+        statusId = resultResponse.data.status.id;
+      }
+
+      // 3. Display the output
+      const data = resultResponse.data;
+      if (data.status.id === 3) {
+        // Accepted
+        setOutput(\`Status: Accepted\\n\\nTime: \${data.time}s\\nMemory: \${data.memory} KB\\n\\nOutput:\\n\${data.stdout || ''}\`);
+      } else if (data.status.id === 6) {
+        // Compilation Error
+        setOutput(\`Compilation Error:\\n\\n\${data.compile_output}\`);
+      } else {
+        // Other errors (Runtime, Time Limit, etc)
+        setOutput(\`Status: \${data.status.description}\\n\\nError:\\n\${data.stderr || data.message || ''}\`);
+      }
+
+    } catch (error) {
+      console.error(error);
+      setOutput(\`Error connecting to code execution server.\\n\\nPlease try again later or use the LeetCode button to submit.\\n\\nDetails: \${error.message}\`);
+    } finally {
+      setRunning(false);
+    }
   }
 
   if (!problem) return (
